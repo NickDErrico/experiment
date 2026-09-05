@@ -1,0 +1,28 @@
+// The canonical Datalog example: transitive closure over a family tree.
+//
+//   datalog run examples/ancestors.dl
+
+parent(alice,  bob).
+parent(alice,  betty).
+parent(bob,    carol).
+parent(betty,  chris).
+parent(carol,  dave).
+
+ancestor(X, Y) :- parent(X, Y).
+ancestor(X, Y) :- parent(X, Z), ancestor(Z, Y).
+
+// Two people are siblings when they share a parent and are not the same
+// person. Note the '!=' guard: without it everyone would be their own sibling.
+sibling(X, Y) :- parent(P, X), parent(P, Y), X != Y.
+
+// Negation is stratified: 'ancestor' is fully computed before 'root' runs.
+root(X) :- parent(X, _), not parent(_, X).
+
+// Aggregates group by the variables they share with the rest of the rule,
+// so this counts descendants per person.
+descendants(X, N) :- root(X), N = count { ancestor(X, _) }.
+
+?- ancestor(alice, Who).
+?- sibling(bob, Who).
+?- root(Who).
+?- descendants(Who, HowMany).

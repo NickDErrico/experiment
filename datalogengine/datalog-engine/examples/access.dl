@@ -1,0 +1,60 @@
+// Role-based access control with role inheritance and explicit denials.
+//
+// Shows off stratified negation: 'denied' must be completely known before
+// 'allowed' can subtract it, and the engine enforces that ordering itself.
+//
+//   datalog run examples/access.dl
+
+// --- Facts ---------------------------------------------------------------
+
+user(alice).
+user(bob).
+user(carol).
+user(dan).        // dan has no role at all
+
+memberOf(alice, admin).
+memberOf(bob,   engineer).
+memberOf(carol, intern).
+
+// Role hierarchy: an admin is also an engineer, an engineer also an employee.
+inherits(admin,    engineer).
+inherits(engineer, employee).
+inherits(intern,   employee).
+
+grant(employee, read,   docs).
+grant(engineer, write,  repo).
+grant(engineer, read,   repo).
+grant(admin,    deploy, prod).
+
+// Explicit denial beats any grant. Both of these revoke a permission the
+// user really does hold through a role, which is the point of the example.
+deny(carol, read,  docs).      // carol is an intern, so employee -> read docs
+deny(bob,   write, repo).      // bob is an engineer, so engineer -> write repo
+
+// --- Rules ---------------------------------------------------------------
+
+// Role inheritance is transitive.
+hasRole(U, R) :- memberOf(U, R).
+hasRole(U, R) :- hasRole(U, S), inherits(S, R).
+
+// A permission is granted through any role the user holds.
+granted(U, Action, Object) :- hasRole(U, R), grant(R, Action, Object).
+
+denied(U, Action, Object) :- deny(U, Action, Object).
+
+// The interesting rule: allowed = granted minus denied.
+allowed(U, Action, Object) :-
+    granted(U, Action, Object),
+    not denied(U, Action, Object).
+
+// Users who can do nothing at all are worth flagging.
+powerless(U) :- user(U), not granted(U, _, _).
+
+// How many distinct permissions does each user end up with?
+permissionCount(U, N) :- user(U), N = count { allowed(U, A, O) }.
+
+?- hasRole(alice, Role).
+?- allowed(bob, Action, Object).
+?- allowed(carol, read, docs).
+?- powerless(Who).
+?- permissionCount(User, N).

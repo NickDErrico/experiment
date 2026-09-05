@@ -1,0 +1,50 @@
+// Andersen-style inclusion-based points-to analysis.
+//
+// This is the example that made Datalog popular for program analysis: the
+// whole fixpoint algorithm is four rules, and the engine works out the
+// iteration order and termination for you.
+//
+//   datalog run examples/pointsto.dl --show pointsTo
+
+// --- The program under analysis -----------------------------------------
+//
+//   a = &x;        addressOf(a, x)
+//   b = a;         assign(b, a)
+//   c = *b;        load(c, b)
+//   *d = e;        store(d, e)
+
+addressOf(a, x).
+addressOf(e, y).
+addressOf(p, a).       // p points at the variable a itself
+addressOf(d, q).
+
+assign(b, a).          // b = a
+assign(f, b).          // f = b
+
+load(c, p).            // c = *p   -- so c gets whatever a points to
+store(d, e).           // *d = e   -- so q gets whatever e points to
+
+// --- The analysis --------------------------------------------------------
+
+// x = &y
+pointsTo(X, Y) :- addressOf(X, Y).
+
+// x = y
+pointsTo(X, A) :- assign(X, Y), pointsTo(Y, A).
+
+// x = *y : if y points to a, and a points to b, then x points to b
+pointsTo(X, B) :- load(X, Y), pointsTo(Y, A), pointsTo(A, B).
+
+// *x = y : if x points to a, and y points to b, then a points to b
+pointsTo(A, B) :- store(X, Y), pointsTo(X, A), pointsTo(Y, B).
+
+// Two pointers may alias when their points-to sets overlap.
+mayAlias(X, Y) :- pointsTo(X, A), pointsTo(Y, A), X != Y.
+
+// How large did each points-to set get?
+setSize(X, N) :- pointsTo(X, _), N = count { pointsTo(X, _) }.
+
+?- pointsTo(c, What).
+?- pointsTo(q, What).
+?- mayAlias(b, Other).
+?- setSize(Pointer, Size).

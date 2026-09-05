@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "datalog-engine"
+version = "0.1.0"
+description = "A small, dependency-free Datalog engine with stratified negation and aggregates"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+keywords = ["datalog", "logic programming", "deductive database", "fixpoint", "static analysis"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Database :: Database Engines/Servers",
+    "Topic :: Software Development :: Interpreters",
+]
+dependencies = []
+
+[project.scripts]
+datalog = "datalog.cli:main"
+
+[project.urls]
+Source = "https://github.com/NickDErrico/experiment"
+
+[tool.setuptools]
+packages = ["datalog"]

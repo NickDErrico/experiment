@@ -1,0 +1,44 @@
+// Graph queries: reachability, cycles, degrees and shortest paths.
+//
+//   datalog run examples/graph.dl --stats
+
+edge(a, b, 4).
+edge(a, c, 2).
+edge(b, d, 5).
+edge(c, b, 1).
+edge(c, d, 8).
+edge(d, e, 3).
+edge(e, c, 7).      // closes a cycle: c -> b -> d -> e -> c
+edge(f, g, 1).      // a separate component
+
+node(X) :- edge(X, _, _).
+node(Y) :- edge(_, Y, _).
+
+// Plain reachability.
+reaches(X, Y) :- edge(X, Y, _).
+reaches(X, Y) :- edge(X, Z, _), reaches(Z, Y).
+
+// A node is on a cycle exactly when it can reach itself.
+onCycle(X) :- reaches(X, X).
+
+// Sources have no incoming edge, sinks no outgoing one.
+source(X) :- node(X), not edge(_, X, _).
+sink(X)   :- node(X), not edge(X, _, _).
+
+// Arithmetic accumulates path costs. Because the graph has a cycle, costs
+// would grow forever without a bound, so we cap the search depth by cost.
+cost(X, Y, C) :- edge(X, Y, C).
+cost(X, Y, C) :- edge(X, Z, C1), cost(Z, Y, C2), C = C1 + C2, C <= 20.
+
+// 'min' over the aggregate's local variable gives the cheapest route.
+shortest(X, Y, C) :- cost(X, Y, _), C = min D { cost(X, Y, D) }.
+
+// Degrees, via counting aggregates.
+outDegree(X, N) :- node(X), N = count { edge(X, _, _) }.
+inDegree(X, N)  :- node(X), N = count { edge(_, X, _) }.
+
+?- source(X).
+?- sink(X).
+?- onCycle(X).
+?- shortest(a, e, Cost).
+?- outDegree(Node, Out).
