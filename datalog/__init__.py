@@ -17,9 +17,13 @@ The engine supports recursion, stratified negation, comparisons, arithmetic and
 aggregates, and evaluates bottom-up with semi-naive iteration.  A query can also
 be answered demand-driven, by the magic-set transformation in
 :mod:`datalog.magic`, so that only the facts it needs are derived.
+
+Any derived fact can be explained: ``engine.explain('path(a, d)')`` returns the
+proof tree that produced it (see :mod:`datalog.explain`).
 """
 
 from .engine import Engine, QueryResult, Relation, solve
+from .explain import Condition, Derivation
 from .errors import (
     DatalogError,
     EvaluationError,
@@ -52,8 +56,10 @@ __all__ = [
     "Atom",
     "BinOp",
     "Compare",
+    "Condition",
     "Const",
     "DatalogError",
+    "Derivation",
     "Engine",
     "EvaluationError",
     "Literal",

@@ -22,6 +22,7 @@ Commands
   :list              show every rule currently loaded
   :preds             list known predicates and their sizes
   :show PRED[/N]     print all tuples of a relation
+  :why FACT          explain why a ground fact was derived
   :strata            show how predicates are stratified
   :stats             show statistics for the last evaluation
   :reset             forget every rule and start over
@@ -236,6 +237,45 @@ def _print_strata(engine, stream):
 
 
 # --------------------------------------------------------------------------
+# explain
+# --------------------------------------------------------------------------
+
+
+def command_explain(args):
+    engine = Engine(track_derivations=True)
+    for path in args.files:
+        text, name = _read(path)
+        engine.load(text, name)
+
+    derivation = engine.explain(args.fact)
+    if derivation is None:
+        if args.json:
+            json.dump({"fact": args.fact, "derivation": None}, sys.stdout, indent=2)
+            sys.stdout.write("\n")
+        else:
+            print("%s is not derivable." % args.fact.strip().rstrip("."), file=sys.stderr)
+        return 1
+
+    if args.json:
+        json.dump(derivation.to_dict(), sys.stdout, indent=2)
+        sys.stdout.write("\n")
+    elif args.facts:
+        for atom in derivation.support():
+            print("%s." % atom)
+    else:
+        print(derivation)
+    return 0
+
+
+def format_derivation(engine, text):
+    """Explain one fact for the REPL, returning the text to print."""
+    derivation = engine.explain(text)
+    if derivation is None:
+        return "  %s is not derivable." % text.strip().rstrip(".")
+    return "\n".join("  " + line for line in str(derivation).splitlines())
+
+
+# --------------------------------------------------------------------------
 # check
 # --------------------------------------------------------------------------
 
@@ -363,6 +403,15 @@ def _repl_command(engine, line):
                 print(format_relation(engine.relation(predicate, arity)))
             except DatalogError as exc:
                 print("error: %s" % exc, file=sys.stderr)
+    elif name == ":why":
+        argument = line.partition(" ")[2].strip()
+        if not argument:
+            print("usage: :why FACT", file=sys.stderr)
+        else:
+            try:
+                print(format_derivation(engine, argument))
+            except DatalogError as exc:
+                print("error: %s" % exc, file=sys.stderr)
     elif name == ":strata":
         try:
             engine.run()
@@ -441,7 +490,7 @@ def build_parser():
     parser = argparse.ArgumentParser(
         prog="datalog",
         description="A small Datalog engine: recursion, stratified negation, "
-        "aggregates, magic sets.",
+        "aggregates, magic sets, and a proof tree for any fact it derives.",
     )
     parser.add_argument("--version", action="version", version="datalog " + __version__)
     subparsers = parser.add_subparsers(dest="command")
@@ -470,6 +519,19 @@ def build_parser():
         help="warn about predicates used but never defined",
     )
     run.set_defaults(handler=command_run)
+
+    explain = subparsers.add_parser(
+        "explain", help="show why a fact was derived, as a proof tree"
+    )
+    explain.add_argument("fact", metavar="FACT", help="the ground fact to explain")
+    explain.add_argument("files", nargs="+", help="Datalog source files ('-' for stdin)")
+    explain.add_argument(
+        "--facts",
+        action="store_true",
+        help="list only the base facts the derivation rests on",
+    )
+    explain.add_argument("--json", action="store_true", help="emit JSON instead of text")
+    explain.set_defaults(handler=command_explain)
 
     check = subparsers.add_parser("check", help="parse and validate without querying")
     check.add_argument("files", nargs="+", help="Datalog source files ('-' for stdin)")

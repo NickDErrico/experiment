@@ -230,6 +230,19 @@ def format_value(value):
     return str(value)
 
 
+def sort_key(value):
+    """A total order over runtime values: numbers first, then strings.
+
+    Mixed-type comparisons therefore give a definite answer instead of raising,
+    and any relation can be sorted.  It lives here, next to
+    :func:`format_value`, because ordering values is as basic as printing them
+    and both the evaluator and the explainer need it.
+    """
+    if isinstance(value, (int, float)):
+        return (0, value, "")
+    return (1, 0, str(value))
+
+
 def expr_vars(expr, out=None):
     """Collect the names of the variables occurring in an expression."""
     if out is None:

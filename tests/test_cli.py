@@ -181,6 +181,62 @@ class TestDemand(CliTestCase):
         self.assertIn("path(a, c).", out)
 
 
+class TestExplain(CliTestCase):
+    def test_prints_a_proof_tree(self):
+        path = self.write("p.dl", PROGRAM)
+        code, out, _ = self.invoke(["explain", "path(a, c)", path])
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            out.splitlines(),
+            [
+                "path(a, c)   by  path(X, Y) :- edge(X, Z), path(Z, Y).",
+                "├─ edge(a, b)",
+                "└─ path(b, c)   by  path(X, Y) :- edge(X, Y).",
+                "   └─ edge(b, c)",
+            ],
+        )
+
+    def test_facts_lists_only_the_leaves(self):
+        path = self.write("p.dl", PROGRAM)
+        code, out, _ = self.invoke(["explain", "path(a, c)", path, "--facts"])
+        self.assertEqual(code, 0)
+        self.assertEqual(out.splitlines(), ["edge(a, b).", "edge(b, c)."])
+
+    def test_json_output(self):
+        path = self.write("p.dl", PROGRAM)
+        code, out, _ = self.invoke(["explain", "path(b, c)", path, "--json"])
+        self.assertEqual(code, 0)
+        payload = json.loads(out)
+        self.assertEqual(payload["fact"], "path(b, c)")
+        self.assertEqual(payload["premises"], [{"fact": "edge(b, c)"}])
+
+    def test_a_fact_that_does_not_hold_fails(self):
+        path = self.write("p.dl", PROGRAM)
+        code, out, err = self.invoke(["explain", "path(c, a)", path])
+        self.assertEqual(code, 1)
+        self.assertEqual(out, "")
+        self.assertIn("not derivable", err)
+
+    def test_a_fact_that_does_not_hold_in_json(self):
+        path = self.write("p.dl", PROGRAM)
+        code, out, _ = self.invoke(["explain", "path(c, a)", path, "--json"])
+        self.assertEqual(code, 1)
+        self.assertIsNone(json.loads(out)["derivation"])
+
+    def test_a_non_ground_goal_is_an_error(self):
+        path = self.write("p.dl", PROGRAM)
+        code, _, err = self.invoke(["explain", "path(a, X)", path])
+        self.assertEqual(code, 1)
+        self.assertIn("ground", err)
+
+    def test_several_files_are_one_program(self):
+        first = self.write("a.dl", "edge(a, b).")
+        second = self.write("b.dl", "path(X, Y) :- edge(X, Y).")
+        code, out, _ = self.invoke(["explain", "path(a, b)", first, second])
+        self.assertEqual(code, 0)
+        self.assertIn("path(a, b)   by  path(X, Y) :- edge(X, Y).", out)
+
+
 class TestCheck(CliTestCase):
     def test_valid_program(self):
         path = self.write("p.dl", PROGRAM)
@@ -260,6 +316,30 @@ class TestRepl(CliTestCase):
         _, out, _ = self.drive(["p(a).", ":help", ":list"])
         self.assertIn("Commands", out)
         self.assertIn("p(a).", out)
+
+    def test_why_explains_a_fact(self):
+        _, out, _ = self.drive(
+            [
+                "edge(a, b). edge(b, c).",
+                "path(X, Y) :- edge(X, Y).",
+                "path(X, Y) :- edge(X, Z), path(Z, Y).",
+                ":why path(a, c)",
+            ]
+        )
+        self.assertIn("path(a, c)   by  path(X, Y) :- edge(X, Z), path(Z, Y).", out)
+        self.assertIn("edge(a, b)", out)
+
+    def test_why_on_a_fact_that_does_not_hold(self):
+        _, out, _ = self.drive(["edge(a, b).", ":why edge(b, a)"])
+        self.assertIn("not derivable", out)
+
+    def test_why_without_an_argument(self):
+        _, _, err = self.drive([":why"])
+        self.assertIn("usage: :why", err)
+
+    def test_why_with_a_bad_goal(self):
+        _, _, err = self.drive(["edge(a, b).", ":why edge(a, X)"])
+        self.assertIn("ground", err)
 
     def test_list_when_empty(self):
         _, out, _ = self.drive([":list"])

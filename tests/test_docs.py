@@ -1,15 +1,29 @@
 """Keep the documentation honest: run the doctests and the README snippets."""
 
+import contextlib
 import doctest
+import io
 import os
 import re
+import shlex
 import unittest
 
 import datalog
-from datalog import Engine, cli, engine, lexer, magic, parser, safety, stratify, syntax
+from datalog import (
+    Engine,
+    cli,
+    engine,
+    explain,
+    lexer,
+    magic,
+    parser,
+    safety,
+    stratify,
+    syntax,
+)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MODULES = [datalog, engine, lexer, magic, parser, safety, stratify, syntax, cli]
+MODULES = [datalog, engine, explain, lexer, magic, parser, safety, stratify, syntax, cli]
 
 
 def load_tests(loader, tests, ignore):
@@ -65,6 +79,38 @@ class TestReadme(unittest.TestCase):
         )
         self.assertTrue(parsed.stats and parsed.strata and parsed.warn_undefined)
         self.assertTrue(parsed.demand)
+        explained = cli.build_parser().parse_args(
+            ["explain", "path(a, d)", "x.dl", "--facts"]
+        )
+        self.assertEqual(explained.fact, "path(a, d)")
+        self.assertTrue(explained.facts)
+
+    def test_explain_transcripts_still_produce_what_they_claim(self):
+        """Every ``$ datalog explain ...`` transcript must match reality.
+
+        Proof trees are exactly the kind of output that drifts silently when a
+        rule or an example changes, so the README's copies are re-run rather
+        than trusted.
+        """
+        transcripts = re.findall(
+            r"^```console\n\$ (datalog explain [^\n]*)\n(.*?)^```",
+            self.readme,
+            re.M | re.S,
+        )
+        self.assertTrue(transcripts, "README lost its 'datalog explain' transcripts")
+        for command, expected in transcripts:
+            with self.subTest(command=command):
+                argv = shlex.split(command)[1:]
+                out = io.StringIO()
+                cwd = os.getcwd()
+                os.chdir(ROOT)
+                try:
+                    with contextlib.redirect_stdout(out):
+                        code = cli.main(argv)
+                finally:
+                    os.chdir(cwd)
+                self.assertEqual(code, 0, command)
+                self.assertEqual(out.getvalue(), expected)
 
     def test_public_api_is_importable(self):
         for name in datalog.__all__:

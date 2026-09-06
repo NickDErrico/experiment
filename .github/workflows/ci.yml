@@ -25,9 +25,17 @@ jobs:
             echo "== $file"
             python -m datalog run "$file" --warn-undefined --stats
           done
+      - name: Explain a fact from every example
+        run: |
+          python -m datalog explain 'allowed(alice, deploy, prod)' examples/access.dl
+          python -m datalog explain 'ancestor(alice, dave)' examples/ancestors.dl
+          python -m datalog explain 'reaches(a, e)' examples/graph.dl
+          python -m datalog explain 'pointsTo(c, x)' examples/pointsto.dl --facts
+          python -m datalog explain 'reaches(blue0, blue9)' examples/metro.dl --json > /dev/null
       - name: Check the package installs and the entry point works
         run: |
           python -m pip install --upgrade pip
           python -m pip install .
           datalog --version
           datalog run examples/ancestors.dl
+          datalog explain 'ancestor(alice, dave)' examples/ancestors.dl

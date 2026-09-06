@@ -3,6 +3,7 @@
 A small, dependency-free Datalog engine in Python: recursion, stratified
 negation, arithmetic, and aggregates, evaluated bottom-up with semi-naive
 iteration — or, when a query is narrow enough to be worth it, with magic sets.
+Any fact it derives, it can also explain.
 
 Datalog is the sweet spot between SQL and Prolog. It is declarative and always
 terminates (no function symbols, so the set of derivable facts is finite), but
@@ -145,6 +146,7 @@ $ datalog run program.dl -q 'path(a, X)'
 $ datalog run program.dl --show path  # dump a whole relation
 $ datalog run program.dl --json       # machine-readable output
 $ datalog run program.dl --demand     # derive only what the queries need
+$ datalog explain 'path(a, d)' program.dl    # why is this fact true?
 $ datalog check program.dl            # parse and validate, don't query
 $ datalog repl program.dl             # interactive session
 ```
@@ -156,7 +158,7 @@ which is usually a typo), `--demand` (see below). With `--demand`, `--stats`
 reports each query's own evaluation rather than one figure for the program.
 
 In the REPL, `:help` lists the commands — `:list`, `:preds`, `:show p`,
-`:strata`, `:stats`, `:load`, `:reset`, `:quit`. Entries spanning several lines
+`:why f(a)`, `:strata`, `:stats`, `:load`, `:reset`, `:quit`. Entries spanning several lines
 are read until a line ends with `.`. A clause that fails to load is rolled back,
 so a mistake never corrupts the session.
 
@@ -245,6 +247,88 @@ from Python, `result.stats` is `None` when the query fell back.
 Demand evaluation runs in its own scratch engine, so it never leaves partial
 relations behind: `engine.relation('path')` still means the whole of `path`.
 
+## Why is this true?
+
+A fixpoint tells you *what* holds. It does not tell you *why*, and for the
+problems Datalog is good at — a policy that grants one permission too many, an
+analysis that reports one alias too many — the tuple is rarely the interesting
+part. The argument behind it is.
+
+`datalog explain`, or `engine.explain(...)`, reconstructs that argument as a
+proof tree: the rule that derived the fact, the premises that rule needed, and
+so on down to the base facts the whole thing rests on.
+
+```console
+$ datalog explain 'allowed(alice, deploy, prod)' examples/access.dl
+allowed(alice, deploy, prod)   by  allowed(U, Action, Object) :- granted(U, Action, Object), not denied(U, Action, Object).
+├─ granted(alice, deploy, prod)   by  granted(U, Action, Object) :- hasRole(U, R), grant(R, Action, Object).
+│  ├─ hasRole(alice, admin)   by  hasRole(U, R) :- memberOf(U, R).
+│  │  └─ memberOf(alice, admin)
+│  └─ grant(admin, deploy, prod)
+└─ not denied(alice, deploy, prod)   (no such fact)
+```
+
+A line with `by` is a derived fact, and shows the rule that derived it; a line
+without one is a base fact, written down in the program. Body literals that are
+not atoms carry the rule's bindings substituted in, so you read `20 >= 18`
+rather than `A >= 18`, `4 = (3 + 1)` rather than `Y = X + 1`, and a negation
+that held is shown as the absence it is.
+
+`--facts` prints only the leaves — the part of the database the conclusion
+actually rests on, which is usually the part you were going to go and change:
+
+```console
+$ datalog explain 'allowed(alice, read, repo)' examples/access.dl --facts
+grant(engineer, read, repo).
+inherits(admin, engineer).
+memberOf(alice, admin).
+```
+
+From Python the tree is an object rather than text — `derivation.support()` is
+that same list of base facts, `depth` is the number of rule applications,
+`rules_used()` the rules involved, `walk()` every node, and `to_dict()` a
+JSON-shaped view (which is what `--json` prints):
+
+```python
+derivation = engine.explain('allowed(alice, read, repo)')
+if derivation is None:
+    print('not derivable')          # nothing to explain
+else:
+    print(derivation)               # the tree above
+    print(derivation.support())     # the base facts it rests on
+```
+
+### Why the search terminates
+
+Working backwards through a recursive program is the part that needs care.
+`path(a, b)` may be derivable from `path(b, a)` and vice versa, so a backward
+search that is not careful will either loop forever or spend exponential time
+backtracking out of loops it wandered into. Worse, it may return a tree that
+proves `path(a, b)` from `path(a, b)` — which looks entirely convincing until
+you check it.
+
+The way out is something semi-naive evaluation already computes. Evaluation
+proceeds in rounds, and a tuple first derived in round *g* can only have come
+from tuples that existed before round *g*: lower strata are finished before a
+stratum starts, and within a stratum each round reads only what earlier rounds
+produced. So the round a tuple first appeared in is a **well-founded measure**
+on facts. The proof search records it and then refuses any step that would use
+a fact from round *g* or later. Every step strictly descends, so the search
+terminates without a cycle check and without backtracking, and no tree it
+returns can contain a fact beneath itself. Within a stratum that measure *is*
+the number of rule applications, so the proof is a shortest one too.
+
+A fact usually has more than one derivation, and which one a search meets first
+otherwise depends on the iteration order of a set — that is, on the process's
+hash seed. Since a debugging tool that prints something different every run is
+not much of a debugging tool, `explain` picks a canonical derivation instead:
+the first applicable rule, and within it the smallest premises in the engine's
+total order. The same program and the same fact always print the same tree.
+
+Recording that round costs an integer per tuple, which is only worth paying if
+you ask. Tracking is therefore off until you call `explain()` — which
+re-evaluates once to switch it on — or build an `Engine(track_derivations=True)`.
+
 ## How it works
 
 **Parse → check → stratify → evaluate.**
@@ -278,6 +362,13 @@ constants forever (`p(Y) :- p(X), Y = X + 1.`). The engine caps iterations and
 total tuples and raises `EvaluationError` with an explanation instead of
 hanging. Both caps are constructor arguments.
 
+*Derivations.* `explain()` runs backwards over the finished database, in
+`datalog/explain.py`, using the round each tuple was first derived in as the
+measure that keeps the search finite (see above). Nothing is replayed and no
+provenance is threaded through evaluation: a proof is reconstructed from the
+rules and the final relations, which is why tracking costs one integer per
+tuple rather than a graph of them.
+
 *Magic sets.* `--demand` inserts a rewriting pass between checking and
 evaluation, adorning each predicate with the binding patterns the query reaches
 it under and guarding its rules with the demand they generate. Two departures
@@ -308,6 +399,13 @@ wrong. The third guards the magic-set rewrite the same way — and asserts that 
 actually fired, since a transformation that always declines would agree with
 itself perfectly.
 
+Derivations get a fourth, of a different shape: a proof can be *checked*. A
+verifier that shares no code with the search confirms that every leaf is a base
+fact, that every step is a real instance of a real rule whose body holds in the
+database, and — the point of the exercise — that no fact appears anywhere
+beneath itself. Every fact derived by every bundled example, and by a run of
+random cyclic graphs, is explained and then checked that way.
+
 ## Limitations
 
 No function symbols or lists, no disjunction in rule bodies, and no persistence.
@@ -315,6 +413,12 @@ Predicates are identified by name *and* arity, and a single name may not be used
 at two arities. Queries are answered bottom-up; `--demand` narrows that to what
 the query needs (see above) but there is no top-down evaluation as such, and the
 rewrite declines on programs whose relevant rules use aggregates.
+
+`explain` answers why a fact *is* derivable. Why one is *not* is a genuinely
+harder question — the honest answer is a description of every way it could have
+been derived and where each one runs out — and the engine does not attempt it.
+It explains one derivation, not all of them, and it explains facts rather than
+query answers, so a query is a two-step affair: ask, then explain an answer.
 
 ## Examples
 

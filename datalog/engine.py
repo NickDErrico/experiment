@@ -15,7 +15,7 @@ from __future__ import annotations
 import time
 from collections import defaultdict
 
-from . import magic
+from . import explain, magic
 from .errors import DatalogError, EvaluationError, StratificationError
 from .parser import parse
 from .safety import compile_rule, order_body
@@ -23,6 +23,7 @@ from .stratify import stratify
 from .syntax import (
     Aggregate,
     Assign,
+    Atom,
     BinOp,
     Compare,
     Const,
@@ -33,6 +34,7 @@ from .syntax import (
     Var,
     format_value,
     literal_vars,
+    sort_key,
 )
 
 _MISSING = object()
@@ -53,12 +55,16 @@ DEFAULT_MAX_ITERATIONS = 100_000
 class Relation:
     """A set of ground tuples, with lazily built indexes on bound positions."""
 
-    __slots__ = ("name", "arity", "tuples", "_version", "_indexes")
+    __slots__ = ("name", "arity", "tuples", "rounds", "_version", "_indexes")
 
     def __init__(self, name, arity, tuples=None):
         self.name = name
         self.arity = arity
         self.tuples = set(tuples) if tuples else set()
+        #: ``{tuple: round}`` for the round each tuple was first derived in,
+        #: populated only when the engine is tracking derivations.  See
+        #: :mod:`datalog.explain` for what the number is good for.
+        self.rounds = {}
         self._version = 0
         self._indexes = {}
 
@@ -177,7 +183,12 @@ class Engine:
     ['b', 'c']
     """
 
-    def __init__(self, max_tuples=DEFAULT_MAX_TUPLES, max_iterations=DEFAULT_MAX_ITERATIONS):
+    def __init__(
+        self,
+        max_tuples=DEFAULT_MAX_TUPLES,
+        max_iterations=DEFAULT_MAX_ITERATIONS,
+        track_derivations=False,
+    ):
         self.rules = []
         self.relations = {}
         self.strata = []
@@ -185,7 +196,12 @@ class Engine:
         self.stats = {}
         self.max_tuples = max_tuples
         self.max_iterations = max_iterations
+        #: Record the round each tuple was first derived in, so that
+        #: :meth:`explain` can reconstruct proofs.  Off by default: it costs an
+        #: integer per tuple, which is only worth paying if you ask.
+        self.track_derivations = track_derivations
         self._arity_of = {}
+        self._generation = 0
         self._dirty = True
 
     # -- loading ----------------------------------------------------------
@@ -257,6 +273,7 @@ class Engine:
 
         self.strata, self.stratum_of = stratify(self.rules)
         self.relations = {}
+        self._generation = 0
         for signature in self.stratum_of:
             self._relation(signature)
 
@@ -341,12 +358,26 @@ class Engine:
                 bucket.add(tup)
 
     def _commit(self, produced):
-        """Move derived tuples into the database; return them as delta relations."""
+        """Move derived tuples into the database; return them as delta relations.
+
+        Every commit opens a new *generation*.  A rule only ever reads tuples
+        committed by earlier generations, so the generation a tuple lands in is
+        a well-founded measure on derivations — which is exactly what
+        :mod:`datalog.explain` needs to walk a proof backwards without looping.
+        The counter runs across strata as well as rounds, so it orders the
+        whole evaluation and not just one stratum of it.
+        """
         delta = {}
+        self._generation += 1
         for signature, tuples in produced.items():
             if not tuples:
                 continue
-            self._relation(signature).update(tuples)
+            relation = self._relation(signature)
+            if self.track_derivations:
+                rounds = relation.rounds
+                for tup in tuples:
+                    rounds.setdefault(tup, self._generation)
+            relation.update(tuples)
             delta[signature] = Relation(signature[0], signature[1], tuples)
         if delta and sum(len(r) for r in self.relations.values()) > self.max_tuples:
             raise EvaluationError(
@@ -625,6 +656,38 @@ class Engine:
             query, variables, _sorted_rows(answers.tuples), stats=engine.stats
         )
 
+    # -- explaining -------------------------------------------------------
+
+    def explain(self, fact, source_name=None):
+        """Return a :class:`~datalog.explain.Derivation` of ``fact``.
+
+        ``fact`` is a ground atom, as text (``"path(a, d)"``) or an
+        :class:`~datalog.syntax.Atom`.  The result is a proof tree: the rule
+        that derived the fact, the premises that rule needed, and so on down to
+        the base facts it rests on.  ``None`` means the fact was never derived,
+        so there is nothing to explain.
+
+        Proofs need to know the round each tuple was derived in, so the first
+        call re-evaluates the program with :attr:`track_derivations` on unless
+        it was already set.  Later calls are free.
+
+        >>> engine = Engine()
+        >>> _ = engine.load('edge(a, b). edge(b, c).'
+        ...                 'path(X, Y) :- edge(X, Y).'
+        ...                 'path(X, Y) :- edge(X, Z), path(Z, Y).')
+        >>> print(engine.explain('path(a, c)'))
+        path(a, c)   by  path(X, Y) :- edge(X, Z), path(Z, Y).
+        ├─ edge(a, b)
+        └─ path(b, c)   by  path(X, Y) :- edge(X, Y).
+           └─ edge(b, c)
+        """
+        atom = _coerce_atom(fact, source_name)
+        if not self.track_derivations:
+            self.track_derivations = True
+            self._dirty = True
+        self.run()
+        return explain.prove(self, atom)
+
 
 # --------------------------------------------------------------------------
 # Value helpers
@@ -634,13 +697,6 @@ class Engine:
 def _sorted_rows(rows):
     """Deduplicated answer rows in the engine's total order."""
     return sorted(set(rows), key=lambda row: tuple(sort_key(v) for v in row))
-
-
-def sort_key(value):
-    """A total order over runtime values: numbers first, then strings."""
-    if isinstance(value, (int, float)):
-        return (0, value, "")
-    return (1, 0, str(value))
 
 
 def compare_values(op, left, right):
@@ -785,6 +841,30 @@ def _coerce_query(goal, source_name=None):
             raise DatalogError("expected exactly one query, got %r" % goal)
         return program.queries[0]
     return Query(tuple(goal))
+
+
+def _coerce_atom(fact, source_name=None):
+    """Read ``fact`` as a single ground atom, however it was written."""
+    if isinstance(fact, Atom):
+        atom = fact
+    elif isinstance(fact, Literal):
+        if fact.negated:
+            raise DatalogError("cannot explain a negated literal: %s" % fact)
+        atom = fact.atom
+    elif isinstance(fact, str):
+        text = fact.strip()
+        if text.startswith("?-"):
+            text = text[2:].strip()
+        if not text.endswith("."):
+            text += "."
+        program = parse(text, source_name)
+        if program.queries or len(program.rules) != 1 or program.rules[0].body:
+            raise DatalogError("expected exactly one fact, got %r" % fact)
+        atom = program.rules[0].head
+    else:
+        raise DatalogError("cannot explain %r" % (fact,))
+    explain.ground_tuple(atom)  # raises with a useful message if it is not ground
+    return atom
 
 
 # --------------------------------------------------------------------------
