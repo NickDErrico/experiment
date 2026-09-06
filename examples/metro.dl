@@ -1,0 +1,76 @@
+// A transit network: twelve one-way lines that never meet.
+//
+// Any one journey concerns a single line, so eleven twelfths of this program is
+// irrelevant to any given question -- which makes it the example to run with
+// `--demand`.  Evaluating everything derives the reachability of all twelve
+// lines; demand-driven evaluation walks forward from the station you asked
+// about and stops there.
+//
+//   datalog run examples/metro.dl --stats
+//   datalog run examples/metro.dl --stats --demand
+
+track(blue0, blue1). track(blue1, blue2). track(blue2, blue3).
+track(blue3, blue4). track(blue4, blue5). track(blue5, blue6).
+track(blue6, blue7). track(blue7, blue8). track(blue8, blue9).
+track(blue9, blue10). track(blue10, blue11).
+
+track(red0, red1). track(red1, red2). track(red2, red3). track(red3, red4).
+track(red4, red5). track(red5, red6). track(red6, red7). track(red7, red8).
+track(red8, red9). track(red9, red10). track(red10, red11).
+
+track(green0, green1). track(green1, green2). track(green2, green3).
+track(green3, green4). track(green4, green5). track(green5, green6).
+track(green6, green7). track(green7, green8). track(green8, green9).
+track(green9, green10). track(green10, green11).
+
+track(gold0, gold1). track(gold1, gold2). track(gold2, gold3).
+track(gold3, gold4). track(gold4, gold5). track(gold5, gold6).
+track(gold6, gold7). track(gold7, gold8). track(gold8, gold9).
+track(gold9, gold10). track(gold10, gold11).
+
+track(teal0, teal1). track(teal1, teal2). track(teal2, teal3).
+track(teal3, teal4). track(teal4, teal5). track(teal5, teal6).
+track(teal6, teal7). track(teal7, teal8). track(teal8, teal9).
+track(teal9, teal10). track(teal10, teal11).
+
+track(olive0, olive1). track(olive1, olive2). track(olive2, olive3).
+track(olive3, olive4). track(olive4, olive5). track(olive5, olive6).
+track(olive6, olive7). track(olive7, olive8). track(olive8, olive9).
+track(olive9, olive10). track(olive10, olive11).
+
+track(plum0, plum1). track(plum1, plum2). track(plum2, plum3).
+track(plum3, plum4). track(plum4, plum5). track(plum5, plum6).
+track(plum6, plum7). track(plum7, plum8). track(plum8, plum9).
+track(plum9, plum10). track(plum10, plum11).
+
+track(slate0, slate1). track(slate1, slate2). track(slate2, slate3).
+track(slate3, slate4). track(slate4, slate5). track(slate5, slate6).
+track(slate6, slate7). track(slate7, slate8). track(slate8, slate9).
+track(slate9, slate10). track(slate10, slate11).
+
+track(amber0, amber1). track(amber1, amber2). track(amber2, amber3).
+track(amber3, amber4). track(amber4, amber5). track(amber5, amber6).
+track(amber6, amber7). track(amber7, amber8). track(amber8, amber9).
+track(amber9, amber10). track(amber10, amber11).
+
+track(rose0, rose1). track(rose1, rose2). track(rose2, rose3).
+track(rose3, rose4). track(rose4, rose5). track(rose5, rose6).
+track(rose6, rose7). track(rose7, rose8). track(rose8, rose9).
+track(rose9, rose10). track(rose10, rose11).
+
+track(navy0, navy1). track(navy1, navy2). track(navy2, navy3).
+track(navy3, navy4). track(navy4, navy5). track(navy5, navy6).
+track(navy6, navy7). track(navy7, navy8). track(navy8, navy9).
+track(navy9, navy10). track(navy10, navy11).
+
+track(mint0, mint1). track(mint1, mint2). track(mint2, mint3).
+track(mint3, mint4). track(mint4, mint5). track(mint5, mint6).
+track(mint6, mint7). track(mint7, mint8). track(mint8, mint9).
+track(mint9, mint10). track(mint10, mint11).
+
+// Where can you get to from here?
+reaches(A, B) :- track(A, B).
+reaches(A, B) :- track(A, M), reaches(M, B).
+
+?- reaches(blue0, Stop).
+?- reaches(blue0, mint4).

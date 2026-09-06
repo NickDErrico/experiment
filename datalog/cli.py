@@ -120,7 +120,10 @@ def command_run(args):
     for text in args.query or []:
         queries.append(_single_query(text))
 
-    engine.run()
+    if not args.demand:
+        # In demand mode each query drives its own evaluation, so there is
+        # nothing to compute up front.
+        engine.run()
 
     if args.warn_undefined:
         for name, arity in engine.undefined_predicates():
@@ -130,7 +133,7 @@ def command_run(args):
                 file=sys.stderr,
             )
 
-    results = [(query, engine.query(query)) for query in queries]
+    results = [(query, engine.query(query, demand=args.demand)) for query in queries]
 
     if args.show_all:
         shown = [
@@ -142,14 +145,7 @@ def command_run(args):
 
     if args.json:
         payload = {
-            "queries": [
-                {
-                    "query": str(query),
-                    "variables": result.variables,
-                    "rows": [list(row) for row in result.rows],
-                }
-                for query, result in results
-            ],
+            "queries": [_query_payload(q, r) for q, r in results],
             "relations": {
                 "%s/%d" % (rel.name, rel.arity): [list(t) for t in rel.sorted_tuples()]
                 for rel in shown
@@ -171,8 +167,36 @@ def command_run(args):
     if args.strata:
         _print_strata(engine, sys.stderr)
     if args.stats:
-        _print_stats(engine, sys.stderr)
+        if args.demand:
+            for query, result in results:
+                _print_query_stats(query, result, engine, sys.stderr)
+        else:
+            _print_stats(engine.stats, sys.stderr)
     return 0
+
+
+def _query_payload(query, result):
+    payload = {
+        "query": str(query),
+        "variables": result.variables,
+        "rows": [list(row) for row in result.rows],
+    }
+    if result.stats is not None:
+        payload["stats"] = result.stats
+    return payload
+
+
+def _print_query_stats(query, result, engine, stream):
+    """Report what answering one query cost, in demand mode."""
+    print(query, file=stream)
+    if result.stats is None:
+        print(
+            "  (not rewritten; answered by evaluating the whole program)",
+            file=stream,
+        )
+        _print_stats(engine.stats, stream, indent="  ")
+    else:
+        _print_stats(result.stats, stream, indent="  ")
 
 
 def _single_query(text):
@@ -189,10 +213,10 @@ def _single_query(text):
     return program.queries[0]
 
 
-def _print_stats(engine, stream):
-    stats = engine.stats
+def _print_stats(stats, stream, indent=""):
     print(
-        "%d rules, %d predicates, %d tuples, %d strata, %d iterations in %.1f ms"
+        indent
+        + "%d rules, %d predicates, %d tuples, %d strata, %d iterations in %.1f ms"
         % (
             stats.get("rules", 0),
             stats.get("predicates", 0),
@@ -348,7 +372,7 @@ def _repl_command(engine, line):
     elif name == ":stats":
         try:
             engine.run()
-            _print_stats(engine, sys.stdout)
+            _print_stats(engine.stats, sys.stdout)
         except DatalogError as exc:
             print("error: %s" % exc, file=sys.stderr)
     elif name == ":load":
@@ -417,7 +441,7 @@ def build_parser():
     parser = argparse.ArgumentParser(
         prog="datalog",
         description="A small Datalog engine: recursion, stratified negation, "
-        "aggregates.",
+        "aggregates, magic sets.",
     )
     parser.add_argument("--version", action="version", version="datalog " + __version__)
     subparsers = parser.add_subparsers(dest="command")
@@ -432,6 +456,12 @@ def build_parser():
     )
     run.add_argument("--show-all", action="store_true", help="print every relation")
     run.add_argument("--json", action="store_true", help="emit JSON instead of text")
+    run.add_argument(
+        "--demand",
+        action="store_true",
+        help="answer each query by magic sets: rewrite the program to derive "
+        "only what the query needs",
+    )
     run.add_argument("--stats", action="store_true", help="report evaluation statistics")
     run.add_argument("--strata", action="store_true", help="report the stratification")
     run.add_argument(

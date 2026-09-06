@@ -2,7 +2,7 @@
 
 A small, dependency-free Datalog engine in Python: recursion, stratified
 negation, arithmetic, and aggregates, evaluated bottom-up with semi-naive
-iteration.
+iteration — or, when a query is narrow enough to be worth it, with magic sets.
 
 Datalog is the sweet spot between SQL and Prolog. It is declarative and always
 terminates (no function symbols, so the set of derivable facts is finite), but
@@ -144,6 +144,7 @@ $ datalog run program.dl              # evaluate and answer the file's queries
 $ datalog run program.dl -q 'path(a, X)'
 $ datalog run program.dl --show path  # dump a whole relation
 $ datalog run program.dl --json       # machine-readable output
+$ datalog run program.dl --demand     # derive only what the queries need
 $ datalog check program.dl            # parse and validate, don't query
 $ datalog repl program.dl             # interactive session
 ```
@@ -151,7 +152,8 @@ $ datalog repl program.dl             # interactive session
 `python -m datalog ...` is equivalent, and `-` reads a program from stdin.
 Useful flags: `--stats` (timing and tuple counts), `--strata` (how predicates
 were stratified), `--warn-undefined` (flag predicates used but never defined,
-which is usually a typo).
+which is usually a typo), `--demand` (see below). With `--demand`, `--stats`
+reports each query's own evaluation rather than one figure for the program.
 
 In the REPL, `:help` lists the commands — `:list`, `:preds`, `:show p`,
 `:strata`, `:stats`, `:load`, `:reset`, `:quit`. Entries spanning several lines
@@ -176,6 +178,8 @@ for row in engine.query('path(a, X)'):
 engine.relation('path').tuples           # {('a','b'), ('b','c'), ('a','c')}
 bool(engine.query('path(a, c)'))         # True — ground queries are yes/no
 engine.stats                             # iterations, tuples, seconds, ...
+
+engine.query('path(a, X)', demand=True)  # same answers, only the work they need
 ```
 
 `load()` returns any `?- ...` queries found in the source rather than running
@@ -184,6 +188,61 @@ and `relation()` call `run()` for you, and adding a rule invalidates the cache.
 
 Everything raises a subclass of `DatalogError`: `ParseError` (with line and
 column), `SafetyError`, `StratificationError`, `EvaluationError`.
+
+## Demand-driven evaluation
+
+Bottom-up evaluation computes everything the program can derive. That is the
+right trade for a broad question and the wrong one for a narrow one: `?- path(a,
+X)` over a large graph builds the entire transitive closure and then keeps one
+node's worth of it.
+
+`--demand`, or `query(..., demand=True)`, answers a query by the **magic-set
+transformation** instead. The program is rewritten so that each predicate gets a
+companion recording which calls the query actually demands, and each rule is
+guarded by it:
+
+```prolog
+// path(X, Y) :- edge(X, Z), path(Z, Y).   asked as   ?- path(a, W).
+// becomes, writing m_path for "path was called with its first argument bound":
+
+m_path(a).                                    // the query is the seed
+path(X, Y) :- m_path(X), edge(X, Z), path(Z, Y).
+m_path(Z)  :- m_path(X), edge(X, Z).          // the demand that rule creates
+```
+
+The guards make each rule fire only for demanded calls, and the last rule
+propagates demand exactly the way the original rule passes bindings sideways —
+so the fixpoint walks forward from `a` instead of building every path in the
+graph. Same answers, less work:
+
+`examples/metro.dl` is twelve transit lines that never meet, so eleven twelfths
+of it is irrelevant to any one journey:
+
+```console
+$ datalog run examples/metro.dl -q 'reaches(blue0, Stop)' --stats
+  134 rules, 2 predicates, 924 tuples, 1 strata, 13 iterations in 3.4 ms
+$ datalog run examples/metro.dl -q 'reaches(blue0, Stop)' --stats --demand
+  ?- reaches(blue0, Stop).
+    138 rules, 5 predicates, 222 tuples, 1 strata, 25 iterations in 1.5 ms
+```
+
+It is a trade, not a free win. Demand is derived in the same fixpoint as the
+answers, so the two leapfrog: roughly two rounds per step of recursion, where
+evaluating everything takes one. Narrow queries over a big database come out
+well ahead; broad ones over a small database pay for the extra joins and get
+nothing back. Measure before reaching for it.
+
+The rewrite never changes what a query means, which leaves the engine free to
+decline it and evaluate the whole program instead. It declines when the query
+binds nothing (there would be no demand to push down), when the rules it reaches
+use aggregates (an under-demanded aggregate would return a wrong number rather
+than fewer rows), and when the rewritten program cannot be stratified — demand
+for a negated goal has to be computed before the goal is read, and for some
+programs no ordering does both. `--stats` says which queries were rewritten;
+from Python, `result.stats` is `None` when the query fell back.
+
+Demand evaluation runs in its own scratch engine, so it never leaves partial
+relations behind: `engine.relation('path')` still means the whole of `path`.
 
 ## How it works
 
@@ -218,6 +277,14 @@ constants forever (`p(Y) :- p(X), Y = X + 1.`). The engine caps iterations and
 total tuples and raises `EvaluationError` with an explanation instead of
 hanging. Both caps are constructor arguments.
 
+*Magic sets.* `--demand` inserts a rewriting pass between checking and
+evaluation, adorning each predicate with the binding patterns the query reaches
+it under and guarding its rules with the demand they generate. Two departures
+from the textbook version, both in `datalog/magic.py`: adornments name the magic
+predicates but not the relations, so `path` still means `path` and answers can
+be read straight out of it; and the pass may return nothing at all, in which
+case the query is answered the ordinary way.
+
 ## Tests
 
 ```console
@@ -228,29 +295,34 @@ The suite needs no dependencies and finishes in well under a second. It also
 runs the module doctests and checks that every Datalog block in this README
 still loads and evaluates, so the documentation cannot drift from the code.
 
-Beyond unit coverage, two differential tests do the
+Beyond unit coverage, three differential tests do the
 heavy lifting on correctness: over random graphs, the engine's transitive
-closure is compared against an independent BFS, and — more importantly — the
-whole semi-naive fixpoint is compared against a deliberately dumb naive
-evaluator that re-fires every rule over the entire database until nothing
-changes. The delta bookkeeping is the easiest thing in an engine like this to
-get subtly wrong, so it is checked against a version too simple to be wrong.
+closure is compared against an independent BFS; the whole semi-naive fixpoint is
+compared against a deliberately dumb naive evaluator that re-fires every rule
+over the entire database until nothing changes; and every demand-driven answer
+is compared against the same query answered by evaluating everything. The first
+two guard the delta bookkeeping, which is the easiest thing in an engine like
+this to get subtly wrong, by checking it against versions too simple to be
+wrong. The third guards the magic-set rewrite the same way — and asserts that it
+actually fired, since a transformation that always declines would agree with
+itself perfectly.
 
 ## Limitations
 
-No function symbols or lists, no disjunction in rule bodies, no top-down/magic-set
-evaluation (queries are answered by evaluating the whole program bottom-up,
-which is the wrong trade for a large database and a very selective query), and
-no persistence. Predicates are identified by name *and* arity, and a single name
-may not be used at two arities.
+No function symbols or lists, no disjunction in rule bodies, and no persistence.
+Predicates are identified by name *and* arity, and a single name may not be used
+at two arities. Queries are answered bottom-up; `--demand` narrows that to what
+the query needs (see above) but there is no top-down evaluation as such, and the
+rewrite declines on programs whose relevant rules use aggregates.
 
 ## Examples
 
-`examples/` holds four runnable programs: `ancestors.dl` (transitive closure,
+`examples/` holds five runnable programs: `ancestors.dl` (transitive closure,
 negation, counting), `graph.dl` (reachability, cycles, shortest paths with
 arithmetic, degrees), `access.dl` (role inheritance with deny-overrides-grant),
-and `pointsto.dl` (Andersen-style points-to analysis — the whole fixpoint
-algorithm in four rules).
+`pointsto.dl` (Andersen-style points-to analysis — the whole fixpoint algorithm
+in four rules), and `metro.dl` (a deliberately disconnected network, to run
+with and without `--demand`).
 
 ## License
 

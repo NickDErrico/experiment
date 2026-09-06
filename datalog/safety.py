@@ -108,9 +108,24 @@ def order_body(body, bound, describe="query"):
             inner, _ = order_body(literal.body, inner_bound, describe=str(literal))
             literal = Aggregate(literal.var, literal.op, literal.expr, tuple(inner))
         ordered.append(literal)
-        bound |= _provides(literal, bound)
+        bound |= provides(literal, bound)
 
     return ordered, bound
+
+
+def provides(literal, bound):
+    """Variables that become bound once ``literal`` has run."""
+    if isinstance(literal, Literal):
+        return set() if literal.negated else atom_vars(literal.atom)
+    if isinstance(literal, Assign):
+        if literal.var.name not in bound:
+            return {literal.var.name}
+        if isinstance(literal.expr, Var):
+            return {literal.expr.name}
+        return set()
+    if isinstance(literal, Aggregate):
+        return {literal.var.name}
+    return set()
 
 
 # --------------------------------------------------------------------------
@@ -182,21 +197,6 @@ def _missing_inputs(literal, bound, group_keys):
     if isinstance(literal, Aggregate):
         return group_keys.get(id(literal), set()) - bound
     raise SafetyError("unsupported body literal: %r" % (literal,))
-
-
-def _provides(literal, bound):
-    """Variables that become bound once ``literal`` has run."""
-    if isinstance(literal, Literal):
-        return set() if literal.negated else atom_vars(literal.atom)
-    if isinstance(literal, Assign):
-        if literal.var.name not in bound:
-            return {literal.var.name}
-        if isinstance(literal.expr, Var):
-            return {literal.expr.name}
-        return set()
-    if isinstance(literal, Aggregate):
-        return {literal.var.name}
-    return set()
 
 
 def _reject_anonymous_head(rule):

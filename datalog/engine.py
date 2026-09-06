@@ -15,7 +15,8 @@ from __future__ import annotations
 import time
 from collections import defaultdict
 
-from .errors import DatalogError, EvaluationError
+from . import magic
+from .errors import DatalogError, EvaluationError, StratificationError
 from .parser import parse
 from .safety import compile_rule, order_body
 from .stratify import stratify
@@ -123,10 +124,13 @@ class Relation:
 class QueryResult:
     """The answers to one query: a variable list plus deduplicated rows."""
 
-    def __init__(self, query, variables, rows):
+    def __init__(self, query, variables, rows, stats=None):
         self.query = query
         self.variables = list(variables)
         self.rows = list(rows)
+        #: Statistics for the evaluation that produced these rows, when it was
+        #: a demand-driven one with its own fixpoint; ``None`` otherwise.
+        self.stats = stats
 
     @property
     def is_ground(self):
@@ -570,27 +574,66 @@ class Engine:
 
     # -- querying ---------------------------------------------------------
 
-    def query(self, goal, source_name=None):
+    def query(self, goal, source_name=None, demand=False):
         """Answer a query.
 
         ``goal`` may be a :class:`~datalog.syntax.Query`, a body (sequence of
         literals), or text such as ``"path(a, X)"`` / ``"?- path(a, X)."``.
+
+        With ``demand=True`` the query is answered by the magic-set
+        transformation (see :mod:`datalog.magic`): the program is rewritten to
+        derive only what this query needs, and evaluated separately, leaving
+        this engine's own relations untouched.  The answers are the same either
+        way, so a program the transformation cannot handle simply falls back to
+        evaluating everything.
         """
-        self.run()
         query = _coerce_query(goal, source_name)
         variables = _query_variables(query.body)
+
+        if demand:
+            result = self._demand_query(query, variables)
+            if result is not None:
+                return result
+
+        self.run()
         ordered, _ = order_body(query.body, set(), describe=str(query))
 
         rows = set()
         for binding in self._solve(tuple(ordered), 0, {}, None, None):
             rows.add(tuple(binding[name] for name in variables))
-        ordered_rows = sorted(rows, key=lambda row: tuple(sort_key(v) for v in row))
-        return QueryResult(query, variables, ordered_rows)
+        return QueryResult(query, variables, _sorted_rows(rows))
+
+    def _demand_query(self, query, variables):
+        """Answer ``query`` by magic sets, or return ``None`` to fall back."""
+        rules = magic.transform(self.rules, query, variables)
+        if rules is None:
+            return None
+
+        engine = Engine(max_tuples=self.max_tuples, max_iterations=self.max_iterations)
+        for rule in rules:
+            engine.add_rule(rule)
+        try:
+            engine.run()
+        except StratificationError:
+            # Demand for a negated goal has to be computed before the goal is
+            # read, and for some programs no ordering does that.  The original
+            # program is stratified, so evaluating all of it still works.
+            return None
+
+        answers = engine._relation((magic.GOAL, len(variables)))
+        return QueryResult(
+            query, variables, _sorted_rows(answers.tuples), stats=engine.stats
+        )
 
 
 # --------------------------------------------------------------------------
 # Value helpers
 # --------------------------------------------------------------------------
+
+
+def _sorted_rows(rows):
+    """Deduplicated answer rows in the engine's total order."""
+    return sorted(set(rows), key=lambda row: tuple(sort_key(v) for v in row))
 
 
 def sort_key(value):
@@ -749,13 +792,15 @@ def _coerce_query(goal, source_name=None):
 # --------------------------------------------------------------------------
 
 
-def solve(source, source_name=None):
+def solve(source, source_name=None, demand=False):
     """Parse and evaluate ``source``; return ``(engine, results)``.
 
     ``results`` pairs each ``?-`` query in the source with its
-    :class:`QueryResult`.
+    :class:`QueryResult`.  With ``demand=True`` each query is answered
+    demand-driven, and the engine is left unevaluated unless a query falls back.
     """
     engine = Engine()
     queries = engine.load(source, source_name)
-    engine.run()
-    return engine, [(query, engine.query(query)) for query in queries]
+    if not demand:
+        engine.run()
+    return engine, [(query, engine.query(query, demand=demand)) for query in queries]

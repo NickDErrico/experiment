@@ -6,10 +6,10 @@ import re
 import unittest
 
 import datalog
-from datalog import Engine, cli, engine, lexer, parser, safety, stratify, syntax
+from datalog import Engine, cli, engine, lexer, magic, parser, safety, stratify, syntax
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MODULES = [datalog, engine, lexer, parser, safety, stratify, syntax, cli]
+MODULES = [datalog, engine, lexer, magic, parser, safety, stratify, syntax, cli]
 
 
 def load_tests(loader, tests, ignore):
@@ -53,9 +53,18 @@ class TestReadme(unittest.TestCase):
 
     def test_documented_cli_flags_exist(self):
         parsed = cli.build_parser().parse_args(
-            ["run", "x.dl", "--stats", "--strata", "--warn-undefined", "--json"]
+            [
+                "run",
+                "x.dl",
+                "--stats",
+                "--strata",
+                "--warn-undefined",
+                "--json",
+                "--demand",
+            ]
         )
         self.assertTrue(parsed.stats and parsed.strata and parsed.warn_undefined)
+        self.assertTrue(parsed.demand)
 
     def test_public_api_is_importable(self):
         for name in datalog.__all__:

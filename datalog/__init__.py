@@ -14,7 +14,9 @@ Quick start::
         print(row['X'])
 
 The engine supports recursion, stratified negation, comparisons, arithmetic and
-aggregates, and evaluates bottom-up with semi-naive iteration.
+aggregates, and evaluates bottom-up with semi-naive iteration.  A query can also
+be answered demand-driven, by the magic-set transformation in
+:mod:`datalog.magic`, so that only the facts it needs are derived.
 """
 
 from .engine import Engine, QueryResult, Relation, solve

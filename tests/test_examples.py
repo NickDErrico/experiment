@@ -129,5 +129,23 @@ class TestGraph(unittest.TestCase):
         self.assertEqual(self.engine.query("outDegree(g, N)").rows, [(0,)])
 
 
+class TestMetro(unittest.TestCase):
+    """The example the README uses to show `--demand` earning its keep."""
+
+    def setUp(self):
+        self.engine = load("metro.dl")
+
+    def test_a_journey_never_leaves_its_line(self):
+        stops = {row["Stop"] for row in self.engine.query("reaches(blue0, Stop)")}
+        self.assertEqual(stops, {"blue%d" % n for n in range(1, 12)})
+        self.assertFalse(self.engine.query("reaches(blue0, mint4)"))
+
+    def test_demand_pays_off_here(self):
+        goal = "reaches(blue0, Stop)"
+        demanded = self.engine.query(goal, demand=True)
+        self.assertEqual(demanded.rows, self.engine.query(goal).rows)
+        self.assertLess(demanded.stats["tuples"], self.engine.stats["tuples"] / 3)
+
+
 if __name__ == "__main__":
     unittest.main()

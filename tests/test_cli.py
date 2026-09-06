@@ -150,6 +150,37 @@ class TestRun(CliTestCase):
         self.assertIn("error:", err)
 
 
+class TestDemand(CliTestCase):
+    def test_demand_answers_the_same_queries(self):
+        path = self.write("p.dl", PROGRAM)
+        _, plain, _ = self.invoke(["run", path])
+        _, demanded, _ = self.invoke(["run", path, "--demand"])
+        self.assertEqual(demanded, plain)
+
+    def test_demand_reports_per_query_statistics(self):
+        path = self.write("p.dl", PROGRAM)
+        _, _, err = self.invoke(["run", path, "--demand", "--stats"])
+        self.assertIn("?- path(a, Where).", err)
+        self.assertIn("iterations", err)
+
+    def test_demand_says_when_it_fell_back(self):
+        path = self.write("p.dl", PROGRAM + "?- path(X, Y).\n")
+        _, _, err = self.invoke(["run", path, "--demand", "--stats"])
+        self.assertIn("not rewritten", err)
+
+    def test_demand_json_carries_the_query_statistics(self):
+        path = self.write("p.dl", PROGRAM)
+        _, out, _ = self.invoke(["run", path, "--demand", "--json"])
+        payload = json.loads(out)
+        self.assertEqual(payload["queries"][0]["rows"], [["b"], ["c"]])
+        self.assertIn("iterations", payload["queries"][0]["stats"])
+
+    def test_demand_still_shows_whole_relations_on_request(self):
+        path = self.write("p.dl", PROGRAM)
+        _, out, _ = self.invoke(["run", path, "--demand", "--show", "path"])
+        self.assertIn("path(a, c).", out)
+
+
 class TestCheck(CliTestCase):
     def test_valid_program(self):
         path = self.write("p.dl", PROGRAM)
