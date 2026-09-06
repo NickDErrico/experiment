@@ -213,17 +213,18 @@ m_path(Z)  :- m_path(X), edge(X, Z).          // the demand that rule creates
 The guards make each rule fire only for demanded calls, and the last rule
 propagates demand exactly the way the original rule passes bindings sideways —
 so the fixpoint walks forward from `a` instead of building every path in the
-graph. Same answers, less work:
-
-`examples/metro.dl` is twelve transit lines that never meet, so eleven twelfths
-of it is irrelevant to any one journey:
+graph. Same answers, less work — `examples/metro.dl` is twelve transit lines that
+never meet, so eleven twelfths of it is irrelevant to any one journey:
 
 ```console
-$ datalog run examples/metro.dl -q 'reaches(blue0, Stop)' --stats
-  134 rules, 2 predicates, 924 tuples, 1 strata, 13 iterations in 3.4 ms
-$ datalog run examples/metro.dl -q 'reaches(blue0, Stop)' --stats --demand
-  ?- reaches(blue0, Stop).
-    138 rules, 5 predicates, 222 tuples, 1 strata, 25 iterations in 1.5 ms
+$ datalog run examples/metro.dl --stats          # statistics only, from stderr
+134 rules, 2 predicates, 924 tuples, 1 strata, 13 iterations in 3.4 ms
+
+$ datalog run examples/metro.dl --stats --demand
+?- reaches(blue0, Stop).
+  138 rules, 5 predicates, 222 tuples, 1 strata, 25 iterations in 1.5 ms
+?- reaches(blue0, mint4).
+  138 rules, 5 predicates, 145 tuples, 1 strata, 14 iterations in 0.8 ms
 ```
 
 It is a trade, not a free win. Demand is derived in the same fixpoint as the
