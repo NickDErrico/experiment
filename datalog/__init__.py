@@ -20,10 +20,15 @@ be answered demand-driven, by the magic-set transformation in
 
 Any derived fact can be explained: ``engine.explain('path(a, d)')`` returns the
 proof tree that produced it (see :mod:`datalog.explain`).
+
+Facts can also be asserted and retracted after the fact:
+``engine.update(add=['edge(c, d)'])`` maintains the fixpoint incrementally and
+reports what changed (see :mod:`datalog.incremental`).
 """
 
 from .engine import Engine, QueryResult, Relation, solve
 from .explain import Condition, Derivation
+from .incremental import Delta
 from .errors import (
     DatalogError,
     EvaluationError,
@@ -59,6 +64,7 @@ __all__ = [
     "Condition",
     "Const",
     "DatalogError",
+    "Delta",
     "Derivation",
     "Engine",
     "EvaluationError",

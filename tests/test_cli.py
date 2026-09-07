@@ -237,6 +237,78 @@ class TestExplain(CliTestCase):
         self.assertIn("path(a, b)   by  path(X, Y) :- edge(X, Y).", out)
 
 
+class TestDiff(CliTestCase):
+    def test_asserting_a_fact_prints_what_it_adds(self):
+        path = self.write("p.dl", PROGRAM)
+        code, out, err = self.invoke(["diff", path, "--add", "edge(c, d)"])
+        self.assertEqual(code, 0)
+        self.assertIn("+ edge(c, d)", out)
+        self.assertIn("+ path(a, d)", out)
+        self.assertIn("4 added, 0 removed.", err)
+
+    def test_retracting_a_fact_prints_what_it_removes(self):
+        path = self.write("p.dl", PROGRAM)
+        _, out, err = self.invoke(["diff", path, "--remove", "edge(a, b)"])
+        self.assertIn("- edge(a, b)", out)
+        self.assertIn("- path(a, b)", out)
+        self.assertIn("- path(a, c)", out)
+        self.assertIn("0 added, 3 removed.", err)
+
+    def test_only_narrows_to_one_predicate(self):
+        path = self.write("p.dl", PROGRAM)
+        _, out, err = self.invoke(["diff", path, "--add", "edge(c, d)", "--only", "path"])
+        self.assertNotIn("edge", out)
+        self.assertIn("+ path(c, d)", out)
+        self.assertIn("3 added, 0 removed.", err)
+
+    def test_add_and_remove_together(self):
+        path = self.write("p.dl", PROGRAM)
+        _, out, _ = self.invoke(
+            ["diff", path, "--add", "edge(c, d)", "--remove", "edge(a, b)"]
+        )
+        self.assertIn("+ edge(c, d)", out)
+        self.assertIn("- edge(a, b)", out)
+
+    def test_a_change_with_no_consequences_says_so(self):
+        path = self.write("p.dl", PROGRAM)
+        _, out, err = self.invoke(["diff", path, "--add", "edge(a, b)"])
+        self.assertEqual(out, "")
+        self.assertIn("no change.", err)
+
+    def test_warns_when_retracting_something_that_is_not_a_fact(self):
+        path = self.write("p.dl", PROGRAM)
+        code, _, err = self.invoke(["diff", path, "--remove", "path(a, c)"])
+        self.assertEqual(code, 0)
+        self.assertIn("nothing to retract", err)
+
+    def test_json_output(self):
+        path = self.write("p.dl", PROGRAM)
+        _, out, _ = self.invoke(["diff", path, "--add", "edge(c, d)", "--json"])
+        payload = json.loads(out)
+        self.assertIn("path(a, d)", payload["added"])
+        self.assertEqual(payload["removed"], [])
+        self.assertEqual(payload["stats"]["mode"], "incremental")
+
+    def test_json_honours_only(self):
+        path = self.write("p.dl", PROGRAM)
+        _, out, _ = self.invoke(
+            ["diff", path, "--add", "edge(c, d)", "--json", "--only", "edge"]
+        )
+        self.assertEqual(json.loads(out)["added"], ["edge(c, d)"])
+
+    def test_stats(self):
+        path = self.write("p.dl", PROGRAM)
+        _, _, err = self.invoke(["diff", path, "--add", "edge(c, d)", "--stats"])
+        self.assertIn("incremental:", err)
+        self.assertIn("iterations", err)
+
+    def test_bad_fact_is_reported(self):
+        path = self.write("p.dl", PROGRAM)
+        code, _, err = self.invoke(["diff", path, "--add", "edge(a, X)"])
+        self.assertEqual(code, 1)
+        self.assertIn("error:", err)
+
+
 class TestCheck(CliTestCase):
     def test_valid_program(self):
         path = self.write("p.dl", PROGRAM)
@@ -296,6 +368,35 @@ class TestRepl(CliTestCase):
         )
         self.assertIn("ok (1 clause)", out)
         self.assertIn("1 answer.", out)
+
+    def test_retract_takes_a_fact_back_and_shows_the_change(self):
+        _, out, _ = self.drive(
+            [
+                "edge(a, b). edge(b, c).",
+                "path(X, Y) :- edge(X, Y).",
+                "path(X, Y) :- edge(X, Z), path(Z, Y).",
+                "?- path(a, X).",
+                ":retract edge(b, c)",
+                "?- path(a, X).",
+            ]
+        )
+        self.assertIn("2 answers.", out)
+        self.assertIn("- path(a, c)", out)
+        self.assertIn("1 answer.", out)
+
+    def test_retract_refuses_a_derived_fact(self):
+        _, out, _ = self.drive(
+            [
+                "edge(a, b).",
+                "path(X, Y) :- edge(X, Y).",
+                ":retract path(a, b)",
+            ]
+        )
+        self.assertIn("is not a fact of this session", out)
+
+    def test_retract_without_an_argument_explains_itself(self):
+        _, _, err = self.drive([":retract"])
+        self.assertIn("usage: :retract", err)
 
     def test_multi_line_entry(self):
         _, out, _ = self.drive(

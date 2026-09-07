@@ -3,7 +3,8 @@
 A small, dependency-free Datalog engine in Python: recursion, stratified
 negation, arithmetic, and aggregates, evaluated bottom-up with semi-naive
 iteration — or, when a query is narrow enough to be worth it, with magic sets.
-Any fact it derives, it can also explain.
+Any fact it derives, it can also explain. Facts can be asserted and retracted
+afterwards, and it will tell you exactly which conclusions moved.
 
 Datalog is the sweet spot between SQL and Prolog. It is declarative and always
 terminates (no function symbols, so the set of derivable facts is finite), but
@@ -147,6 +148,7 @@ $ datalog run program.dl --show path  # dump a whole relation
 $ datalog run program.dl --json       # machine-readable output
 $ datalog run program.dl --demand     # derive only what the queries need
 $ datalog explain 'path(a, d)' program.dl    # why is this fact true?
+$ datalog diff program.dl --remove 'edge(a, b)'   # what changes if it isn't?
 $ datalog check program.dl            # parse and validate, don't query
 $ datalog repl program.dl             # interactive session
 ```
@@ -158,7 +160,7 @@ which is usually a typo), `--demand` (see below). With `--demand`, `--stats`
 reports each query's own evaluation rather than one figure for the program.
 
 In the REPL, `:help` lists the commands — `:list`, `:preds`, `:show p`,
-`:why f(a)`, `:strata`, `:stats`, `:load`, `:reset`, `:quit`. Entries spanning several lines
+`:why f(a)`, `:retract f(a)`, `:strata`, `:stats`, `:load`, `:reset`, `:quit`. Entries spanning several lines
 are read until a line ends with `.`. A clause that fails to load is rolled back,
 so a mistake never corrupts the session.
 
@@ -182,6 +184,10 @@ bool(engine.query('path(a, c)'))         # True — ground queries are yes/no
 engine.stats                             # iterations, tuples, seconds, ...
 
 engine.query('path(a, X)', demand=True)  # same answers, only the work they need
+
+engine.assert_fact('edge(c, d)')         # -> Delta: what that made true
+engine.retract_fact('edge(a, b)')        # -> Delta: what that made false
+engine.update(add=['edge(c, d)'], remove=['edge(a, b)'])
 ```
 
 `load()` returns any `?- ...` queries found in the source rather than running
@@ -329,6 +335,108 @@ Recording that round costs an integer per tuple, which is only worth paying if
 you ask. Tracking is therefore off until you call `explain()` — which
 re-evaluates once to switch it on — or build an `Engine(track_derivations=True)`.
 
+## What changes if?
+
+`explain` answers a question about the database you have. The other question
+you ask of a policy or an analysis is about a database you are thinking of
+having: *if I take this fact away, what stops being true?*
+
+Facts can be asserted and retracted after evaluation, and the engine reports
+exactly which conclusions moved:
+
+```python
+engine.assert_fact('edge(c, d)')     # Delta: + edge(c, d), + path(a, d), ...
+engine.retract_fact('edge(a, b)')    # Delta: - edge(a, b), - path(a, c), ...
+engine.update(add=[...], remove=[...])
+```
+
+A `Delta` is the change itself — `added` and `removed`, keyed by predicate,
+plus `added_facts()` / `removed_facts()` for the same thing as atoms. From the
+command line it prints as a diff, which is the whole feature in one screen:
+
+```console
+$ datalog diff examples/access.dl --remove 'memberOf(alice, admin)'
+- allowed(alice, deploy, prod)
+- allowed(alice, read, docs)
+- allowed(alice, read, repo)
+- allowed(alice, write, repo)
+- granted(alice, deploy, prod)
+- granted(alice, read, docs)
+- granted(alice, read, repo)
+- granted(alice, write, repo)
+- hasRole(alice, admin)
+- hasRole(alice, employee)
+- hasRole(alice, engineer)
+- memberOf(alice, admin)
++ permissionCount(alice, 0)
+- permissionCount(alice, 4)
++ powerless(alice)
+2 added, 13 removed.
+```
+
+Read the two `+` lines: dropping one group membership does not only take
+permissions away, it also *grants* something, because `powerless` is defined by
+a negation and the aggregate `permissionCount` moved. `--only allowed` narrows
+the report to one predicate; `--json` emits it for a script.
+
+Retraction removes the *assertion*, not the conclusion. Retracting a fact that
+the rules still derive some other way changes nothing, and retracting something
+that was never written down as a fact does nothing at all — `is_asserted` tells
+the two apart, and the command line warns rather than silently agreeing with a
+typo.
+
+### Delete and rederive
+
+Asserting is the easy half: Datalog without negation is monotone, so new facts
+can only add consequences, and the semi-naive loop already chases those.
+
+Retracting is the hard half, for one specific reason. A derived fact does not
+belong to the rule that happened to derive it — it holds because *some*
+derivation supports it, and usually several do. Retracting `edge(a, b)` only
+retracts `path(a, c)` if every path from `a` to `c` used that edge, and nothing
+in the database records whether one did. The support was consumed during
+evaluation and thrown away.
+
+**DRed** splits that question in two, because the cheap over-approximation and
+the expensive exact check have very different costs. First *overdelete*: assume
+the worst, and provisionally delete every fact with a derivation that touched
+something removed, transitively. That is a forward chase over deltas — the same
+machinery as insertion, run over the pre-update database — and it is fast. Then
+*rederive*: for each provisionally deleted fact, ask whether it still follows
+from what survived, and put back the ones that do. Since a restored fact can
+support another, that is itself a fixpoint. Finally, insert.
+
+The price of over-approximating is that a fact is sometimes torn down and
+rebuilt. The alternative — a support count on every tuple — makes deletion
+exact but taxes every insertion and every byte of the database whether or not
+anything is ever retracted. DRed keeps the cost on the operation that asks for
+it.
+
+Negation and aggregation are where incremental algorithms usually go wrong, and
+stratification is what makes them tractable: both cross strata *strictly*, so
+maintaining the strata in order means every stratum is maintained against lower
+ones that are already final. The awkward cases then become ordinary — a
+deletion below can *add* facts above when `not q(x)` starts holding, an
+insertion below can *remove* them, and any change under an aggregate moves its
+value, so the rules that read it are re-derived against the new numbers. That
+is what the two `+` lines above are.
+
+What is *not* incremental is changing the rules. Rules determine the
+stratification, and a new stratification renumbers the order the algorithm
+walks; a fact for a predicate the program has never mentioned is the same
+problem in miniature. `update` detects that and re-evaluates instead, which is
+always correct and is what the engine did before any of this existed.
+`delta.stats["mode"]` says which route was taken.
+
+It is worth it when the consequences are local, which is the case worth
+optimising: over a chain-shaped graph of 33,000 tuples, extending one line by
+one stop and taking it away again costs about 4 ms against 110 ms to
+re-evaluate. When the consequences are not local it is a smaller win or none —
+cutting a metro line in half is a 32-fact change to `reaches`, and maintenance
+and recomputation cost about the same. Proofs survive it: a rederived fact is
+committed in a later generation than the facts supporting it, so `explain` still
+terminates and still cannot return a tree containing a fact beneath itself.
+
 ## How it works
 
 **Parse → check → stratify → evaluate.**
@@ -353,9 +461,20 @@ p(X).` has no stratified model — and is rejected with the cycle spelled out.
 *Semi-naive evaluation.* Strata are evaluated in order. Within a stratum, the
 first round fires every rule; each later round re-fires a rule only against the
 tuples derived in the previous round, since any genuinely new derivation must
-use at least one of them. Relations keep lazily built, version-stamped indexes
-on whichever argument positions are bound, so joins are hash lookups rather
-than scans.
+use at least one of them. Relations keep lazily built indexes on whichever
+argument positions are bound, so joins are hash lookups rather than scans. An
+index is maintained in place when a change is small relative to the relation
+and thrown away to be rebuilt when it is not, since maintaining one costs the
+size of the change and rebuilding costs the size of the relation.
+
+*Which way round to join.* A rule re-fired against a delta can be driven from
+either side, and the compiled body order is the wrong choice when the delta is
+small: for `path(X, Y) :- edge(X, Z), path(Z, Y).` with a delta on `path`, it
+scans the whole of `edge` before looking the delta up. So the engine compares
+the two and starts from whichever is smaller, reordering the body around the
+delta when that wins. Reordering a conjunction cannot change which tuples
+satisfy it, so this derives the same facts in the same rounds — it is purely a
+question of how much work each one is.
 
 *Termination.* Pure Datalog always terminates, but arithmetic can invent new
 constants forever (`p(Y) :- p(X), Y = X + 1.`). The engine caps iterations and
@@ -368,6 +487,13 @@ measure that keeps the search finite (see above). Nothing is replayed and no
 provenance is threaded through evaluation: a proof is reconstructed from the
 rules and the final relations, which is why tracking costs one integer per
 tuple rather than a graph of them.
+
+*Maintenance.* `update()` walks the strata in order, and in each one
+over-deletes, re-derives and then inserts, in `datalog/incremental.py`. The
+pre-update state a stratum needs in order to chase derivations that no longer
+exist is reconstructed on demand from the changes recorded so far, and only for
+the relations that stratum reads — so a relation of a million tuples is never
+copied to discover that three of them moved.
 
 *Magic sets.* `--demand` inserts a rewriting pass between checking and
 evaluation, adorning each predicate with the binding patterns the query reaches
@@ -387,17 +513,28 @@ The suite needs no dependencies and finishes in well under a second. It also
 runs the module doctests and checks that every Datalog block in this README
 still loads and evaluates, so the documentation cannot drift from the code.
 
-Beyond unit coverage, three differential tests do the
+Beyond unit coverage, four differential tests do the
 heavy lifting on correctness: over random graphs, the engine's transitive
 closure is compared against an independent BFS; the whole semi-naive fixpoint is
 compared against a deliberately dumb naive evaluator that re-fires every rule
-over the entire database until nothing changes; and every demand-driven answer
-is compared against the same query answered by evaluating everything. The first
-two guard the delta bookkeeping, which is the easiest thing in an engine like
-this to get subtly wrong, by checking it against versions too simple to be
-wrong. The third guards the magic-set rewrite the same way — and asserts that it
-actually fired, since a transformation that always declines would agree with
-itself perfectly.
+over the entire database until nothing changes; every demand-driven answer
+is compared against the same query answered by evaluating everything; and every
+incrementally maintained database is compared against one evaluated from
+scratch. The first two guard the delta bookkeeping, which is the easiest thing
+in an engine like this to get subtly wrong, by checking it against versions too
+simple to be wrong. The third guards the magic-set rewrite the same way — and
+asserts that it actually fired, since a transformation that always declines
+would agree with itself perfectly.
+
+The fourth is the one that makes retraction trustworthy. It drives random
+sequences of assertions and retractions through programs with recursion,
+negation, aggregates and four-deep strata, and after every single update
+demands that the maintained database match a freshly evaluated one tuple for
+tuple, *and* that the reported delta be exactly the difference between the
+database before and after. Over-deleting shows up as a missing tuple,
+under-deleting as a phantom one, and a wrong delta on its own — which is the
+only way to catch a DRed bug, since every one of them is by definition a
+disagreement with the answer the engine would otherwise have given.
 
 Derivations get a fourth, of a different shape: a proof can be *checked*. A
 verifier that shares no code with the search confirms that every leaf is a base

@@ -32,6 +32,14 @@ jobs:
           python -m datalog explain 'reaches(a, e)' examples/graph.dl
           python -m datalog explain 'pointsTo(c, x)' examples/pointsto.dl --facts
           python -m datalog explain 'reaches(blue0, blue9)' examples/metro.dl --json > /dev/null
+      - name: Diff a change against every example
+        run: |
+          python -m datalog diff examples/access.dl --remove 'memberOf(alice, admin)' --stats
+          python -m datalog diff examples/ancestors.dl --remove 'parent(alice, bob)'
+          python -m datalog diff examples/graph.dl --add 'edge(e, a, 1)' --only reaches
+          python -m datalog diff examples/pointsto.dl --add 'assign(p, d)'
+          python -m datalog diff examples/metro.dl --remove 'track(blue3, blue4)' --json > /dev/null
+
       - name: Check the package installs and the entry point works
         run: |
           python -m pip install --upgrade pip

@@ -23,6 +23,7 @@ Commands
   :preds             list known predicates and their sizes
   :show PRED[/N]     print all tuples of a relation
   :why FACT          explain why a ground fact was derived
+  :retract FACT      take back an asserted fact and show what changes
   :strata            show how predicates are stratified
   :stats             show statistics for the last evaluation
   :reset             forget every rule and start over
@@ -267,6 +268,73 @@ def command_explain(args):
     return 0
 
 
+# --------------------------------------------------------------------------
+# diff
+# --------------------------------------------------------------------------
+
+
+def command_diff(args):
+    """Show what asserting and retracting facts does to a program's conclusions."""
+    engine = Engine()
+    for path in args.files:
+        text, name = _read(path)
+        engine.load(text, name)
+    engine.run()
+
+    # Retracting something the program never asserted is legal and does
+    # nothing, which on a command line is almost always a typo rather than an
+    # intention, so say so.
+    for fact in args.remove:
+        if not engine.is_asserted(fact):
+            print(
+                "warning: %s is not a fact of this program, so there is nothing "
+                "to retract" % fact.strip().rstrip("."),
+                file=sys.stderr,
+            )
+
+    delta = engine.update(add=args.add, remove=args.remove)
+
+    if args.json:
+        payload = delta.to_dict()
+        if args.only:
+            payload["added"] = [str(a) for a in delta.added_facts(args.only)]
+            payload["removed"] = [str(a) for a in delta.removed_facts(args.only)]
+        json.dump(payload, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return 0
+
+    body = delta.format(args.only)
+    if body:
+        print(body)
+    added = len(delta.added_facts(args.only))
+    removed = len(delta.removed_facts(args.only))
+    if not added and not removed:
+        print("no change.", file=sys.stderr)
+    else:
+        print("%d added, %d removed." % (added, removed), file=sys.stderr)
+    if args.stats:
+        stats = delta.stats
+        print(
+            "%s: %d tuples, %d iterations, %d rederived in %.1f ms"
+            % (
+                stats.get("mode", "incremental"),
+                stats.get("tuples", 0),
+                stats.get("iterations", 0),
+                stats.get("rederived", 0),
+                1000 * stats.get("seconds", 0.0),
+            ),
+            file=sys.stderr,
+        )
+    return 0
+
+
+def format_delta(delta, indent="  "):
+    """Render a :class:`~datalog.incremental.Delta` for the REPL."""
+    if not delta:
+        return indent + "no change."
+    return "\n".join(indent + line for line in delta.format().splitlines())
+
+
 def format_derivation(engine, text):
     """Explain one fact for the REPL, returning the text to print."""
     derivation = engine.explain(text)
@@ -412,6 +480,18 @@ def _repl_command(engine, line):
                 print(format_derivation(engine, argument))
             except DatalogError as exc:
                 print("error: %s" % exc, file=sys.stderr)
+    elif name == ":retract":
+        argument = line.partition(" ")[2].strip()
+        if not argument:
+            print("usage: :retract FACT", file=sys.stderr)
+        else:
+            try:
+                if not engine.is_asserted(argument):
+                    print("  %s is not a fact of this session." % argument.rstrip("."))
+                else:
+                    print(format_delta(engine.retract_fact(argument)))
+            except DatalogError as exc:
+                print("error: %s" % exc, file=sys.stderr)
     elif name == ":strata":
         try:
             engine.run()
@@ -532,6 +612,31 @@ def build_parser():
     )
     explain.add_argument("--json", action="store_true", help="emit JSON instead of text")
     explain.set_defaults(handler=command_explain)
+
+    diff = subparsers.add_parser(
+        "diff", help="show what asserting or retracting facts would change"
+    )
+    diff.add_argument("files", nargs="+", help="Datalog source files ('-' for stdin)")
+    diff.add_argument(
+        "--add",
+        metavar="FACT",
+        action="append",
+        default=[],
+        help="assert a ground fact (repeatable)",
+    )
+    diff.add_argument(
+        "--remove",
+        metavar="FACT",
+        action="append",
+        default=[],
+        help="retract an asserted ground fact (repeatable)",
+    )
+    diff.add_argument(
+        "--only", metavar="PRED", help="report changes to this predicate only"
+    )
+    diff.add_argument("--json", action="store_true", help="emit JSON instead of text")
+    diff.add_argument("--stats", action="store_true", help="report maintenance statistics")
+    diff.set_defaults(handler=command_diff)
 
     check = subparsers.add_parser("check", help="parse and validate without querying")
     check.add_argument("files", nargs="+", help="Datalog source files ('-' for stdin)")

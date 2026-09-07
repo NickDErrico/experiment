@@ -5,11 +5,11 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "datalog-engine"
 version = "0.1.0"
-description = "A small, dependency-free Datalog engine with stratified negation, aggregates, magic-set evaluation and explainable derivations"
+description = "A small, dependency-free Datalog engine with stratified negation, aggregates, magic-set evaluation, incremental maintenance and explainable derivations"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
-keywords = ["datalog", "logic programming", "deductive database", "fixpoint", "magic sets", "static analysis", "provenance", "explainability"]
+keywords = ["datalog", "logic programming", "deductive database", "fixpoint", "magic sets", "incremental view maintenance", "static analysis", "provenance", "explainability"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",

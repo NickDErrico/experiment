@@ -15,7 +15,7 @@ from __future__ import annotations
 import time
 from collections import defaultdict
 
-from . import explain, magic
+from . import explain, incremental, magic
 from .errors import DatalogError, EvaluationError, StratificationError
 from .parser import parse
 from .safety import compile_rule, order_body
@@ -30,6 +30,7 @@ from .syntax import (
     Literal,
     Program,
     Query,
+    Rule,
     UnaryOp,
     Var,
     format_value,
@@ -462,6 +463,145 @@ class Engine:
                 "memory" % self.max_tuples
             )
         return delta
+
+    # -- incremental maintenance ------------------------------------------
+
+    def update(self, add=(), remove=()):
+        """Assert and retract facts, bringing the database up to date.
+
+        ``add`` and ``remove`` are ground facts — text such as ``"edge(a, b)"``,
+        or :class:`~datalog.syntax.Atom` objects.  Retractions are applied
+        first, so asserting and retracting the same fact in one call leaves it
+        asserted.
+
+        Returns a :class:`~datalog.incremental.Delta`: every fact, base or
+        derived, that appeared or disappeared.
+
+        >>> engine = Engine()
+        >>> _ = engine.load('edge(a, b). path(X, Y) :- edge(X, Y).'
+        ...                 'path(X, Y) :- edge(X, Z), path(Z, Y).')
+        >>> print(engine.update(add=['edge(b, c)']))
+        + edge(b, c)
+        + path(a, c)
+        + path(b, c)
+
+        Retracting a fact removes the *assertion*, not the conclusion: a tuple
+        that other rules still derive stays, and retracting something that was
+        never asserted as a fact changes nothing.
+
+        The work done is proportional to what changes rather than to what the
+        database holds, by the algorithm in :mod:`datalog.incremental`.  A
+        change that alters the stratification — a fact for a predicate the
+        program has never mentioned — is answered by re-evaluating instead,
+        which gives the same answer; ``delta.stats["mode"]`` says which route
+        was taken.  Scanning for the fact rules to retract is linear in the
+        size of the *program*, so retracting a batch beats retracting one at a
+        time in a loop.
+        """
+        inserted_atoms = _fact_list(add, "add")
+        deleted_atoms = _fact_list(remove, "remove")
+        if not inserted_atoms and not deleted_atoms:
+            return incremental.Delta()
+
+        self.run()
+
+        # Which asserted fact rules does this actually touch?
+        asserted = {}
+        for position, rule in enumerate(self.rules):
+            if not rule.body:
+                key = (rule.head.signature, explain.ground_tuple(rule.head))
+                asserted.setdefault(key, []).append(position)
+
+        deleted = defaultdict(set)
+        drop = set()
+        for atom in deleted_atoms:
+            key = (atom.signature, explain.ground_tuple(atom))
+            positions = asserted.get(key)
+            if positions:
+                drop.update(positions)
+                deleted[key[0]].add(key[1])
+
+        inserted = defaultdict(set)
+        additions = []
+        for atom in inserted_atoms:
+            key = (atom.signature, explain.ground_tuple(atom))
+            if key[1] in deleted[key[0]]:
+                # Asserted and retracted together: the assertion wins, and the
+                # two cancel rather than tearing the fact down and rebuilding it.
+                deleted[key[0]].discard(key[1])
+                drop.difference_update(asserted[key])
+                continue
+            if key in asserted or key[1] in inserted[key[0]]:
+                continue  # already a fact; asserting it again is a no-op
+            compiled = compile_rule(Rule(atom, (), 0))
+            self._check_arity(compiled)
+            additions.append(compiled)
+            inserted[key[0]].add(key[1])
+
+        deleted = {sig: tuples for sig, tuples in deleted.items() if tuples}
+        if not drop and not additions:
+            return incremental.Delta()
+
+        if drop:
+            self.rules = [
+                rule for position, rule in enumerate(self.rules) if position not in drop
+            ]
+        self.rules.extend(additions)
+
+        # Facts carry no body, so asserting and retracting them adds and
+        # removes no dependency edges: every constraint the current
+        # stratification satisfies, it still satisfies afterwards.  The one
+        # thing that can go wrong is a fact for a predicate the program has
+        # never mentioned, which is a node the stratification does not have.
+        touched = set(inserted) | set(deleted)
+        if all(signature in self.stratum_of for signature in touched):
+            delta = incremental.maintain(self, inserted, deleted)
+        else:
+            # A predicate nothing has heard of: re-stratify and re-evaluate.
+            before = {sig: set(rel.tuples) for sig, rel in self.relations.items()}
+            self._dirty = True
+            self.run(force=True)
+            after = {sig: rel.tuples for sig, rel in self.relations.items()}
+            stats = dict(self.stats)
+            stats["mode"] = "recompute"
+            delta = incremental.diff(before, after, stats)
+
+        self._dirty = False
+        self.stats = dict(self.stats)
+        self.stats["rules"] = len(self.rules)
+        self.stats["predicates"] = len(self.relations)
+        self.stats["tuples"] = sum(len(rel) for rel in self.relations.values())
+        return delta
+
+    def is_asserted(self, fact):
+        """True if ``fact`` is written down in the program as a fact.
+
+        The distinction that matters for :meth:`update`: only an asserted fact
+        can be retracted.  A tuple that is merely *derived* is a consequence of
+        the rules, and goes away only when its support does.
+
+        >>> engine = Engine()
+        >>> _ = engine.load('edge(a, b). path(X, Y) :- edge(X, Y).')
+        >>> engine.is_asserted('edge(a, b)'), engine.is_asserted('path(a, b)')
+        (True, False)
+        """
+        atom = _coerce_atom(fact)
+        tup = explain.ground_tuple(atom)
+        signature = atom.signature
+        return any(
+            not rule.body
+            and rule.head.signature == signature
+            and explain.ground_tuple(rule.head) == tup
+            for rule in self.rules
+        )
+
+    def assert_fact(self, fact):
+        """Assert one ground fact; see :meth:`update`."""
+        return self.update(add=[fact])
+
+    def retract_fact(self, fact):
+        """Retract one asserted ground fact; see :meth:`update`."""
+        return self.update(remove=[fact])
 
     # -- solving ----------------------------------------------------------
 
@@ -918,6 +1058,17 @@ def _coerce_query(goal, source_name=None):
             raise DatalogError("expected exactly one query, got %r" % goal)
         return program.queries[0]
     return Query(tuple(goal))
+
+
+def _fact_list(facts, label):
+    """Read one fact or a sequence of them as ground atoms."""
+    if isinstance(facts, (str, Atom, Literal)):
+        facts = [facts]
+    try:
+        items = list(facts)
+    except TypeError:
+        raise DatalogError("%s= expects facts, got %r" % (label, facts))
+    return [_coerce_atom(fact) for fact in items]
 
 
 def _coerce_atom(fact, source_name=None):

@@ -14,6 +14,7 @@ from datalog import (
     cli,
     engine,
     explain,
+    incremental,
     lexer,
     magic,
     parser,
@@ -23,7 +24,19 @@ from datalog import (
 )
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MODULES = [datalog, engine, explain, lexer, magic, parser, safety, stratify, syntax, cli]
+MODULES = [
+    datalog,
+    engine,
+    explain,
+    incremental,
+    lexer,
+    magic,
+    parser,
+    safety,
+    stratify,
+    syntax,
+    cli,
+]
 
 
 def load_tests(loader, tests, ignore):
