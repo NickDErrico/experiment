@@ -55,7 +55,7 @@ DEFAULT_MAX_ITERATIONS = 100_000
 class Relation:
     """A set of ground tuples, with lazily built indexes on bound positions."""
 
-    __slots__ = ("name", "arity", "tuples", "rounds", "_version", "_indexes")
+    __slots__ = ("name", "arity", "tuples", "rounds", "_indexes")
 
     def __init__(self, name, arity, tuples=None):
         self.name = name
@@ -65,7 +65,10 @@ class Relation:
         #: populated only when the engine is tracking derivations.  See
         #: :mod:`datalog.explain` for what the number is good for.
         self.rounds = {}
-        self._version = 0
+        #: ``{positions: {key: {tuples}}}``, built on first use and then kept up
+        #: to date as tuples arrive and leave.  Rebuilding instead would cost
+        #: the size of the whole relation every time it changed, which is what
+        #: a semi-naive round and an incremental update both do constantly.
         self._indexes = {}
 
     @property
@@ -86,34 +89,88 @@ class Relation:
         if tup in self.tuples:
             return False
         self.tuples.add(tup)
-        self._version += 1
+        if self._indexes:
+            self._index_add(tup)
         return True
 
     def update(self, tuples):
         """Add many tuples; return the number actually added."""
-        before = len(self.tuples)
-        self.tuples.update(tuples)
-        added = len(self.tuples) - before
-        if added:
-            self._version += 1
+        if self._bulk(tuples):
+            before = len(self.tuples)
+            self.tuples.update(tuples)
+            return len(self.tuples) - before
+        added = 0
+        for tup in tuples:
+            if tup not in self.tuples:
+                self.tuples.add(tup)
+                self._index_add(tup)
+                added += 1
         return added
 
+    def remove(self, tuples):
+        """Drop many tuples; return the number actually removed."""
+        if self._bulk(tuples):
+            before = len(self.tuples)
+            self.tuples.difference_update(tuples)
+            return before - len(self.tuples)
+        gone = 0
+        for tup in tuples:
+            if tup in self.tuples:
+                self.tuples.discard(tup)
+                self._index_remove(tup)
+                gone += 1
+        return gone
+
+    def _bulk(self, tuples):
+        """Drop the indexes and take the fast path, if that is the cheaper way.
+
+        Maintaining an index costs the size of the change; throwing it away and
+        letting it rebuild on next use costs the size of the relation.  A
+        semi-naive round early in an evaluation adds a large fraction of the
+        relation and wants the rebuild; an incremental update touches a handful
+        of tuples in a large relation and very much does not.
+        """
+        if not self._indexes:
+            return True
+        if len(tuples) * (len(self._indexes) + 1) < len(self.tuples):
+            return False
+        self._indexes = {}
+        return True
+
     def index(self, positions):
-        """Return ``{key_tuple: [tuples]}`` grouped by the given positions."""
+        """Return ``{key_tuple: {tuples}}`` grouped by the given positions."""
         positions = tuple(positions)
-        cached = self._indexes.get(positions)
-        if cached is not None and cached[0] == self._version:
-            return cached[1]
+        table = self._indexes.get(positions)
+        if table is not None:
+            return table
         table = {}
         for tup in self.tuples:
             key = tuple(tup[p] for p in positions)
             bucket = table.get(key)
             if bucket is None:
-                table[key] = [tup]
+                table[key] = {tup}
             else:
-                bucket.append(tup)
-        self._indexes[positions] = (self._version, table)
+                bucket.add(tup)
+        self._indexes[positions] = table
         return table
+
+    def _index_add(self, tup):
+        for positions, table in self._indexes.items():
+            key = tuple(tup[p] for p in positions)
+            bucket = table.get(key)
+            if bucket is None:
+                table[key] = {tup}
+            else:
+                bucket.add(tup)
+
+    def _index_remove(self, tup):
+        for positions, table in self._indexes.items():
+            key = tuple(tup[p] for p in positions)
+            bucket = table.get(key)
+            if bucket is not None:
+                bucket.discard(tup)
+                if not bucket:
+                    del table[key]
 
     def sorted_tuples(self):
         return sorted(self.tuples, key=lambda tup: tuple(sort_key(v) for v in tup))
@@ -349,13 +406,33 @@ class Engine:
         known = relation.tuples
         bucket = produced[signature]
         terms = rule.head.terms
-        for binding in self._solve(rule.body, 0, {}, delta_position, delta_relation):
+        body = rule.body
+        if delta_position:
+            # A nested-loop join costs about the size of whatever drives it, so
+            # drive it from the smaller side: the delta, or the relation the
+            # compiled order would have scanned first.  Early in an evaluation
+            # the delta is most of the relation and the compiled order wins; for
+            # an incremental update it is a handful of tuples and starting
+            # anywhere else means scanning the database to find them.
+            if len(delta_relation) < self._lead_size(rule):
+                body = rule.delta_body(delta_position)
+                delta_position = 0
+        for binding in self._solve(body, 0, {}, delta_position, delta_relation):
             tup = tuple(
                 term.value if isinstance(term, Const) else binding[term.name]
                 for term in terms
             )
             if tup not in known:
                 bucket.add(tup)
+
+    def _lead_size(self, rule):
+        """How many tuples the compiled body order starts out by scanning."""
+        for literal in rule.body:
+            if isinstance(literal, Literal) and not literal.negated:
+                return len(self._relation(literal.atom.signature))
+        # Nothing in the body scans a relation first, so there is no scan to
+        # beat: driving from the delta is as good as it gets.
+        return float("inf")
 
     def _commit(self, produced):
         """Move derived tuples into the database; return them as delta relations.

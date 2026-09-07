@@ -18,7 +18,7 @@ are to blame.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Tuple
 
 from .errors import SafetyError
@@ -43,10 +43,34 @@ class CompiledRule:
     body: Tuple[object, ...]
     line: int = 0
     source: object = None
+    #: Cache for :meth:`delta_body`, keyed by position.  Excluded from equality
+    #: and hashing: it is derived from ``body``, not part of the rule's identity.
+    _delta_bodies: dict = field(default_factory=dict, compare=False, repr=False)
 
     @property
     def is_fact(self):
         return not self.body
+
+    def delta_body(self, position):
+        """``body`` reordered to start from the literal at ``position``.
+
+        Semi-naive evaluation re-fires a rule against only the tuples derived
+        in the previous round, and leaving the body in its compiled order makes
+        that join read the wrong way round.  For ``p(X, Y) :- e(X, Z), p(Z, Y).``
+        with a delta on ``p``, every round scans the whole of ``e`` and only
+        then looks the delta up — so each round costs the size of the database
+        no matter how small the delta is.  Driving the join from the delta
+        instead turns the round into a handful of index lookups.
+
+        Reordering a conjunction cannot change which tuples satisfy it, so this
+        derives exactly the same facts in exactly the same rounds.
+        """
+        cached = self._delta_bodies.get(position)
+        if cached is None:
+            ordered, _ = order_body(self.body, set(), first=position)
+            cached = tuple(ordered)
+            self._delta_bodies[position] = cached
+        return cached
 
     def __str__(self):
         if self.is_fact:
@@ -83,17 +107,26 @@ def compile_rule(rule):
     return CompiledRule(rule.head, tuple(ordered), rule.line, rule)
 
 
-def order_body(body, bound, describe="query"):
+def order_body(body, bound, describe="query", first=None):
     """Order ``body`` so that every literal runs with its inputs bound.
 
     ``bound`` is the set of variable names already known on entry.  Returns
     ``(ordered_literals, bound_after)``.  Aggregate sub-bodies are ordered
     recursively once the aggregate's own position is fixed.
+
+    ``first`` pins the literal at that index to the front.  It must be a
+    positive atom, which never has inputs to wait for, so pinning one can only
+    bind *more* variables earlier and never makes the rest unschedulable.
     """
     bound = set(bound)
     remaining = list(body)
     group_keys = _group_keys(body)
     ordered = []
+
+    if first is not None:
+        literal = remaining.pop(first)
+        ordered.append(literal)
+        bound |= provides(literal, bound)
 
     while remaining:
         for position, literal in enumerate(remaining):
